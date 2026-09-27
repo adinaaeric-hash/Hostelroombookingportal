@@ -74,7 +74,7 @@ public class HostelBookingGUI extends JFrame {
     private JTextArea raceArea;
 
     public HostelBookingGUI() {
-        super("Aurora University Hostel Booking Portal \u2014 Block B (Corrected Design Demo)");
+        super("Aurora University Hostel Booking Portal \u2014");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
         getContentPane().setBackground(PAGE_BG);
@@ -131,18 +131,11 @@ public class HostelBookingGUI extends JFrame {
         JLabel title = new JLabel("\uD83C\uDFE8  Aurora University Hostel Booking Portal");
         title.setForeground(Color.WHITE);
         title.setFont(title.getFont().deriveFont(Font.BOLD, 19f));
-        JLabel subtitle = new JLabel("Block B \u2014 Corrected Design Demo  \u00b7  SEN-311 Assignment 1");
-        subtitle.setForeground(PEARL_AQUA);
-        subtitle.setFont(subtitle.getFont().deriveFont(Font.PLAIN, 12.5f));
         titleBox.add(title);
         titleBox.add(Box.createVerticalStrut(3));
-        titleBox.add(subtitle);
+        
         bar.add(titleBox, BorderLayout.WEST);
-
-        JLabel badge = new JLabel("\u25CF  Race-condition safe  \u00b7  Atomic booking  \u00b7  Full audit trail");
-        badge.setForeground(MINT_LEAF);
-        badge.setFont(badge.getFont().deriveFont(Font.BOLD, 12f));
-        bar.add(badge, BorderLayout.EAST);
+        
 
         return bar;
     }
@@ -174,7 +167,7 @@ public class HostelBookingGUI extends JFrame {
         navBook.setSelected(true);
 
         sidebar.add(Box.createVerticalGlue());
-        JLabel footer = new JLabel("<html>Aurora Hostel Office<br/>Block B Demo Build</html>");
+        JLabel footer = new JLabel("<html>Aurora Hostel Office<br/></html>");
         footer.setForeground(new Color(255, 255, 255, 140));
         footer.setFont(footer.getFont().deriveFont(Font.PLAIN, 11f));
         footer.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -246,10 +239,7 @@ public class HostelBookingGUI extends JFrame {
 
         page.add(topPinned(stack), BorderLayout.CENTER);
 
-        JLabel hint = new JLabel("<html><i>Tip: register a couple of students, book rooms, try booking a second room for the same " +
-                "student (rejected), let a deposit expire (25s demo window), or switch/cancel a reservation.</i></html>");
-        hint.setForeground(TEXT_MUTED);
-        page.add(hint, BorderLayout.SOUTH);
+ 
 
         return page;
     }
