@@ -10,10 +10,14 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Core booking engine for a single hostel block.
+ * Core booking engine for the hostel (Blocks A, B and C).
  *
- * Concurrency note: bookRoom(), payDeposit(), cancelBooking(), switchBooking()
- * and releaseExpiredBookings() are all `synchronized` on this system instance.
+ * Block C is reserved for special (accessibility) bookings. Normal students can only
+ * book rooms in Blocks A and B; this is enforced here, not just in the GUI.
+ *
+ * Concurrency note: bookRoom(), bookRoomById(), payDeposit(), cancelBooking(),
+ * switchBooking(), switchBookingToRoom() and releaseExpiredBookings() are all
+ * `synchronized` on this system instance.
  * That turns the "find an available room, then mark it booked" sequence -
  * the exact defect that caused the Block B double-booking in the case study -
  * into a single atomic critical section, so at most one caller can ever
@@ -52,6 +56,11 @@ public class HostelBookingSystem {
     public Collection<Student> allStudents() { return students.values(); }
     public Duration getDepositWindow() { return depositWindow; }
 
+    /** Snapshot of every booking ever made (used by the dashboard charts). */
+    public synchronized List<Booking> allBookings() {
+        return new ArrayList<>(bookings.values());
+    }
+
     // ---------- core flow ----------
 
     /**
@@ -60,6 +69,48 @@ public class HostelBookingSystem {
      * atomic check-and-hold on room availability (race-condition fix).
      */
     public synchronized Booking bookRoom(String rollNumber, RoomType type, boolean requireAccessible) throws BookingException {
+        Student student = requireStudentWithoutActiveBooking(rollNumber);
+
+        Room room = findAvailableRoom(type, requireAccessible || student.needsAccessible());
+        if (room == null) {
+            auditLog.log("BOOK_REJECTED", rollNumber, "no AVAILABLE room of type " + type
+                    + (student.needsAccessible() ? " (accessible)" : ""));
+            throw new BookingException("No available " + type + " room" +
+                    (student.needsAccessible() ? " with accessibility requirements" : "") + " right now.");
+        }
+        return holdRoom(student, room);
+    }
+
+    /**
+     * Books one specific, chosen room (used when a student clicks a room in the
+     * Blocks &amp; Rooms window). Same rules as bookRoom(): one active reservation per
+     * student, and an atomic check-and-hold so two students can never win the same room.
+     */
+    public synchronized Booking bookRoomById(String rollNumber, String roomId) throws BookingException {
+        Student student = requireStudentWithoutActiveBooking(rollNumber);
+        Room room = requireBookableRoom(student, roomId, "BOOK_REJECTED");
+        return holdRoom(student, room);
+    }
+
+    /** Marks the room HELD and creates the PENDING_PAYMENT booking. Caller must hold the system lock. */
+    private Booking holdRoom(Student student, Room room) {
+        // --- atomic hold: this is the whole critical section that fixes the race condition ---
+        room.setStatus(RoomStatus.HELD);
+        String bookingId = "BK-" + bookingSeq.getAndIncrement();
+        room.setCurrentBookingId(bookingId);
+
+        Instant now = Instant.now();
+        Booking booking = new Booking(bookingId, student.getRollNumber(), room.getRoomId(), now, now.plus(depositWindow));
+        bookings.put(bookingId, booking);
+        student.setActiveBookingId(bookingId);
+        // --- end critical section ---
+
+        auditLog.log("BOOKED", student.getRollNumber(), bookingId + " room=" + room.getRoomId()
+                + " depositDeadline=" + booking.getDepositDeadline());
+        return booking;
+    }
+
+    private Student requireStudentWithoutActiveBooking(String rollNumber) throws BookingException {
         Student student = students.get(rollNumber);
         if (student == null) {
             throw new BookingException("Unknown student roll number: " + rollNumber);
@@ -73,38 +124,42 @@ public class HostelBookingSystem {
             throw new BookingException("Student " + rollNumber + " already has an active reservation: "
                     + existing.getBookingId() + " (status=" + existing.getStatus() + "). Cancel or switch it first.");
         }
-
-        Room room = findAvailableRoom(type, requireAccessible || student.needsAccessible());
-        if (room == null) {
-            auditLog.log("BOOK_REJECTED", rollNumber, "no AVAILABLE room of type " + type
-                    + (student.needsAccessible() ? " (accessible)" : ""));
-            throw new BookingException("No available " + type + " room" +
-                    (student.needsAccessible() ? " with accessibility requirements" : "") + " right now.");
-        }
-
-        // --- atomic hold: this is the whole critical section that fixes the race condition ---
-        room.setStatus(RoomStatus.HELD);
-        String bookingId = "BK-" + bookingSeq.getAndIncrement();
-        room.setCurrentBookingId(bookingId);
-
-        Instant now = Instant.now();
-        Booking booking = new Booking(bookingId, rollNumber, room.getRoomId(), now, now.plus(depositWindow));
-        bookings.put(bookingId, booking);
-        student.setActiveBookingId(bookingId);
-        // --- end critical section ---
-
-        auditLog.log("BOOKED", rollNumber, bookingId + " room=" + room.getRoomId()
-                + " depositDeadline=" + booking.getDepositDeadline());
-        return booking;
+        return student;
     }
 
-    private Room findAvailableRoom(RoomType type, boolean requireAccessible) {
+    /** Checks that the chosen room exists, is bookable by this student and is still AVAILABLE. */
+    private Room requireBookableRoom(Student student, String roomId, String rejectEvent) throws BookingException {
+        Room room = rooms.get(roomId);
+        if (room == null) {
+            throw new BookingException("Unknown room: " + roomId);
+        }
+        // Block C is only for special (accessibility) bookings.
+        if (!student.needsAccessible() && "C".equals(room.getBlock())) {
+            auditLog.log(rejectEvent, student.getRollNumber(), "room " + roomId + " is in Block C (special bookings only)");
+            throw new BookingException("Block C is reserved for students with a registered accessibility requirement.");
+        }
+        // Every room is wheelchair-accessible, so an accessibility requirement never restricts
+        // which room a student may choose; this only guards against a room that somehow isn't
+        // accessible (defensive - should never trigger with the current room data).
+        if (!room.isAccessible() && student.needsAccessible()) {
+            auditLog.log(rejectEvent, student.getRollNumber(), "room " + roomId + " is not accessible");
+            throw new BookingException("Room " + roomId + " is not accessible and cannot be booked by a "
+                    + "student with a registered accessibility requirement.");
+        }
+        if (room.getStatus() != RoomStatus.AVAILABLE) {
+            auditLog.log(rejectEvent, student.getRollNumber(), "room " + roomId + " not AVAILABLE (" + room.getStatus() + ")");
+            throw new BookingException("Room " + roomId + " is no longer available (" + room.getStatus() + ").");
+        }
+        return room;
+    }
+
+    /** specialBooking = student has a registered accessibility requirement (or asked for one). */
+    private Room findAvailableRoom(RoomType type, boolean specialBooking) {
         for (Room r : rooms.values()) {
-            if (r.getStatus() == RoomStatus.AVAILABLE && r.getType() == type) {
-                if (!requireAccessible || r.isAccessible()) {
-                    return r;
-                }
-            }
+            if (r.getStatus() != RoomStatus.AVAILABLE || r.getType() != type) continue;
+            // Block C is only for special (accessibility) bookings
+            if (!specialBooking && "C".equals(r.getBlock())) continue;
+            return r;
         }
         return null;
     }
@@ -175,10 +230,7 @@ public class HostelBookingSystem {
      * has no availability.
      */
     public synchronized Booking switchBooking(String bookingId, RoomType newType) throws BookingException {
-        Booking oldBooking = requireBooking(bookingId);
-        if (oldBooking.getStatus() != BookingStatus.PENDING_PAYMENT && oldBooking.getStatus() != BookingStatus.CONFIRMED) {
-            throw new BookingException("Booking " + bookingId + " cannot be switched (status=" + oldBooking.getStatus() + ")");
-        }
+        Booking oldBooking = requireSwitchableBooking(bookingId);
         Student student = students.get(oldBooking.getStudentRoll());
 
         Room newRoom = findAvailableRoom(newType, student.needsAccessible());
@@ -186,6 +238,33 @@ public class HostelBookingSystem {
             auditLog.log("SWITCH_REJECTED", oldBooking.getStudentRoll(), "no AVAILABLE room of type " + newType);
             throw new BookingException("No available " + newType + " room to switch into; original booking kept.");
         }
+        return moveToRoom(oldBooking, student, newRoom);
+    }
+
+    /**
+     * Same as switchBooking(), but into one specific, chosen room (click-to-switch in the
+     * Blocks &amp; Rooms window). The new room is held first; the old one is released only after.
+     */
+    public synchronized Booking switchBookingToRoom(String bookingId, String roomId) throws BookingException {
+        Booking oldBooking = requireSwitchableBooking(bookingId);
+        Student student = students.get(oldBooking.getStudentRoll());
+        if (roomId.equals(oldBooking.getRoomId())) {
+            throw new BookingException("You are already in room " + roomId + ".");
+        }
+        Room newRoom = requireBookableRoom(student, roomId, "SWITCH_REJECTED");
+        return moveToRoom(oldBooking, student, newRoom);
+    }
+
+    private Booking requireSwitchableBooking(String bookingId) throws BookingException {
+        Booking oldBooking = requireBooking(bookingId);
+        if (oldBooking.getStatus() != BookingStatus.PENDING_PAYMENT && oldBooking.getStatus() != BookingStatus.CONFIRMED) {
+            throw new BookingException("Booking " + bookingId + " cannot be switched (status=" + oldBooking.getStatus() + ")");
+        }
+        return oldBooking;
+    }
+
+    private Booking moveToRoom(Booking oldBooking, Student student, Room newRoom) {
+        String bookingId = oldBooking.getBookingId();
 
         // Hold the new room first.
         newRoom.setStatus(RoomStatus.HELD);
